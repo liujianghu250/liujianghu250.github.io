@@ -1,34 +1,3 @@
-Skip to content
-Search or jump to…
-
-Pull requests
-Issues
-Marketplace
-Explore
- 
-@liujianghu250 
-Learn Git and GitHub without any code!
-Using the Hello World guide, you’ll start a branch, write comments, and open a pull request.
-
-
-liujianghu250
-/
-liujianghu250.github.io
-1
-00
- Code
- Issues 0
- Pull requests 0 Actions
- Projects 0
- Wiki
- Security 0
- Insights
- Settings
-liujianghu250.github.io/Q&A
-@liujianghu250 liujianghu250 Create Q&A
-4b1d999 1 minute ago
-156 lines (138 sloc)  11.1 KB
-  
 # 逻辑地址、虚拟地址、线性地址、物理地址的区别是什么？
 答：
 **逻辑地址**是编程时使用的地址，比如常用到的指针，指针内存的是某变量的地址，这个地址指的就是逻辑地址。
