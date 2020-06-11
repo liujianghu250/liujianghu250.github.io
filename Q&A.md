@@ -76,6 +76,7 @@ static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 	return pgd;
 }
 `
+
 重点应该是__get_free_page，但是暂时没看懂，后面再来看。
 
 ## X86_32的虚拟地址空间是如何分布的？X86_64的虚拟地址空间是如何分布的？
@@ -193,8 +194,82 @@ asmlinkage long sys_clone(unsigned long clone_flags, unsigned long newsp, void _
 }
 `
 ## IDT表是如何被初始化的？
+### IDT的第一次初始化
+当计算机还运行在实模式时，IDT被初始化并由BIOS例程使用。这部分由BIOS负责，暂时不深入了解。
+### IDT的在内核中的初始化
+在arch\x86\boot\main.c的main()函数中，最后一句是调用go_to_protected_mod();也就是从实模式离开，进入保护模式。
+而在go_to_protected_mod()中，有一句setup_idt();
+`
 
+static void setup_idt(void)
+{
+	static const struct gdt_ptr null_idt = {0, 0};
+	asm volatile("lidtl %0" : : "m" (null_idt));//l 代表32位，初始化idt寄存器
+}
+
+struct gdt_ptr {
+	u16 len;
+	u32 ptr;
+} __attribute__((packed));
+
+`
+可以看出，该函数对idt进行了初始化，但长度和地址都是0。
+而在arch\x86\kern\kernel\machine_kexec_64.c中，另外有一个set_idt()函数，被machine_kexec（）调用，而且限长与物理地址同样是0。去看了看则几个函数的调用层次。
+set_idt() <- machine_kexec（）<- kernel_kexec（）<- SYSCALL_DEFINE4，然后发现SYSCALL_DEFINE4只被用于reboot。
+也就是说，boot和reboot对idtr的初始化都是长度为0，地址也为0。
+
+
+
+`
+//将curidt中的值加载到中断描述符表格寄存器 (IDTR)。
+static void set_idt(void *newidt, u16 limit)
+{
+	struct desc_ptr curidt;
+
+	/* x86-64 supports unaliged loads & stores */
+	curidt.size    = limit;
+	curidt.address = (unsigned long)newidt;
+
+	__asm__ __volatile__ (
+		"lidtq %0\n"
+		: : "m" (curidt)
+		);
+	//q可能是指64位。
+};
+`
+
+#### 预初始化
+一旦Linux接管，IDT就被转移到RAM的另一个区域，并进行第二次初始化。
+首先用setup_idt()函数用同一个中断门（即指向ignore_int()中断处理程序）来填充所有256个idt表项。
+ignore_int()处理程序可以看作一个空的处理程序，除了保存寄存器、恢复寄存器，执行iret恢复被中断的程序以外，只调用printk（）函数打印“Unknown iterrupt”系统消息。
+ignore_int()应该从不执行，除非是出现了硬件问题（一个I/O设备正在产生没有预料到的中断）或内核问题（一个中断或异常没有被适当地处理）。
+
+### 用有意义的陷阱和中断处理程序替换ignore_int()。
+一旦这个过程完成，对控制单元产生的每个不同的异常，IDT都有一个专门的陷阱或系统门，而对于可编程中断控制器确认的每一个IRQ，IDT都将包括一个专门的中断门。
+使用set_intr_gate（）插入用户程序无法访问的中断门，set_system_gate（）插入系统门
+set_system_intr_gate（）插入系统中断门，set_trap_gate（）插入陷阱门……
+各种门的分类，有机会再了解
 ## 说一下内核处理中断的完整过程？
+确定向量，读idt表，找到中断处理程序，保存与装载寄存器值，跳转到中断处理程序，中断处理完成后，控制权转交给被中断的进程。
+执行中断处理程序时，Linux中，紧随中断要执行的操作有三类：
+1. 禁止可屏蔽中断后执行的操作，要在一个中断处理程序中立即执行，如对PIC应答中断，对PIC或设备控制器编程，或者修改由设备和处理器同时访问的数据结构。
+2. 开中断情况下，需要很快完成的操作。如，修改只有处理器才会访问的数据结构。
+3. 可以被延迟较长的时间间隔，由独立的函数执行的操作，如把缓冲区的内容拷贝到某个进程的地址空间。
+
+
+### I/O中断
+在PCI总线的体系结构中，几个设备可以共享同一个IRQ线，而一个中断向量是对应一个IRQ线，而不是设备。
+所以仅仅中断向量无法说明所有问题，I/O中断处理程序必须足够灵活以给多个设备同时提供服务。
+中断处理程序的灵活性是以两种不同的方式实现的。
+#### IRQ共享
+中断处理程序执行多个中断服务例程（ISR）。每个ISR是一个与单独设备（共享IRQ线）相关的函数，因为不可能预先知道是哪个特定的设备产生IRQ，所以，每个ISR都被执行，以验证它的设备是否需要关注。如果是，当设备产生中断时，就执行需要执行的所有操作。
+
+#### IRQ动态分配
+一条IRQ线在可能的最后时刻才与一个设备驱动程序相关联，例如，软盘设备的IRQ线只有在用户访问软盘设备时才被分配。
+
+### 处理器间中断
+
+### 时钟中断
 ## 网卡的中断服务程序正在执行过程中会被新的网卡中断打断吗？
 ## Linux支持哪些中断下半部，它们的区别是什么？ 
 ## 对/proc/interrupts和/proc/softirqs进行解读
