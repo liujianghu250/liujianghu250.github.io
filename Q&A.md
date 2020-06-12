@@ -452,6 +452,7 @@ Linux定义了三种处理器间中断
 对于每个中断，会依次显示irq的序号， 在各自cpu上发生中断的次数，可编程中断控制器，设备名称（request_irq的dev_name字段）
 
 `
+
 int show_interrupts(struct seq_file *p, void *v)
 {
 	static int prec;
@@ -521,7 +522,6 @@ out:
 	return 0;
 }
 #endif
-
 `
 
 
@@ -573,6 +573,7 @@ PIW:          0          0          0          0   Posted-interrupt wakeup event
 生成该文件的代码是fs/proc/softirq.c,具体如下：
 
 `
+
 #include <linux/init.h>
 #include <linux/kernel_stat.h>
 #include <linux/proc_fs.h>
