@@ -68,7 +68,7 @@
 这也就意味着，它完全不需要拥有自己的页表——使用**内核页表**就够了。
 
 #### 内核页表
-内核维持着一组自己使用的页表，驻留在所谓的主内核页全局目录中。主内核页全局目录的最高目录项部分作为参考模型，位系统中每个普通进程对于的页全局目录项提供参考模型。
+内核维持着一组自己使用的页表，驻留在所谓的主内核页全局目录中。主内核页全局目录的最高目录项部分作为参考模型，为系统中每个普通进程对于的页全局目录项提供参考模型。
 
 内核会确保对主内核页全局目录的修改能传递到由进程使用的页全局目录中。
 
@@ -99,32 +99,8 @@ Linux把cr3控制寄存器的内容保存在**前一个执行进程的描述符*
 
 ### cr3中是页目录表的物理地址，而指针是逻辑地址，是怎么实现相互转换的呢？
 
-首先看看创建新进程时，内核是如何为新进程分配页全局目录的。
+页目录表放在内核空间，物理地址和逻辑地址的转换很简单，加减PAGE_OFFSET即可。
 
-也就是看看pgd_alloc()函数的具体实现：
-
-`
-static inline pgd_t *pgd_alloc(struct mm_struct *mm)
-{
-	unsigned boundary;
-	pgd_t *pgd = (pgd_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
-	if (!pgd)
-		return NULL;
-	/*
-	 * Copy kernel pointers in from init.
-	 * Could keep a freelist or slab cache of those because the kernel
-	 * part never changes.
-	 */
-	boundary = pgd_index(__PAGE_OFFSET);
-	memset(pgd, 0, boundary * sizeof(pgd_t));
-	memcpy(pgd + boundary,
-	       init_level4_pgt + boundary,
-	       (PTRS_PER_PGD - boundary) * sizeof(pgd_t));
-	return pgd;
-}
-`
-
-重点应该是__get_free_page，但是暂时没看懂，后面再来看。
 
 ## X86_32的虚拟地址空间是如何分布的？X86_64的虚拟地址空间是如何分布的？
 ### X86_32的虚拟地址空间分布
