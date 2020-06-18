@@ -11,6 +11,7 @@
 
 如果是x86_64，在x86_64_start_kernel()函数中可以看到以下语句：
 
+
 `
 	for (i = 0; i < NUM_EXCEPTION_VECTORS; i++)
 		set_intr_gate(i, early_idt_handler_array[i]);
@@ -24,6 +25,7 @@
 中断处理程序的地址。
 
 同时，这个函数还会将中断门插入至 IDT 表中，代码中的 &idt_descr 数组即为 IDT。
+
 
 `
 early_idt_handler_array 数组，它定义在 arch/x86/include/asm/segment.h 头文件中，包含了前32个异常处理程序的地址：
