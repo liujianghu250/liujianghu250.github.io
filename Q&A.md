@@ -325,14 +325,479 @@ asmlinkage long sys_clone(unsigned long clone_flags, unsigned long newsp, void _
 
 从代码层面看，spin_lock的第一句，就是禁止内核抢占……
 
-## 内核是如何维持墙钟和单调时钟的？系统睡眠唤醒对单调时钟是否有影响？设置系统时间对单调时钟是 否有影响？ Linux中的高精度定时器和低精度定时器分别是如何组织的？ malloc()分配的物理内存是连续的吗，kmalloc()呢，为什么？
+## 内核是如何维持墙钟和单调时钟的？系统睡眠唤醒对单调时钟是否有影响？设置系统时间对单调时钟是 否有影响？
+## Linux中的高精度定时器和低精度定时器分别是如何组织的？
+## malloc()分配的物理内存是连续的吗，kmalloc()呢，为什么？
+malloc()函数是对进程中的堆（一个特殊的线性区）进行内存分配的函数。
+malloc(size)请求size个字节的动态内存。如果分配成功，就返回所分配内存单元第一个字节的线性地址。
+malloc()分配的内存的线性地址是连续的，在同一页框内的物理地址也是连续的，但是不同页之间的物理地址不一定连续。
+
+kmalloc()分配的物理内存是连续的。因为调用kmalloc()函数实际得到的是普通高速缓存中的对象，它们具有几何分布的大小。
 ## 缺页异常处理的过程是怎样的？ 
-## echo m > /proc/sysrq-trigger可以将内存信息比较详细的输出到dmesg中，请解读 ps可以看到内核线程的内存使用都是0，为什么？
+## echo m > /proc/sysrq-trigger可以将内存信息比较详细的输出到dmesg中，请解读 
+/proc/sysrq-trigger文件通过/drivers/tty/sysrq.c文件生成。
+首先是模块注册。
+`
+static int __init sysrq_init(void)
+{
+	sysrq_init_procfs();
+
+	if (sysrq_on())
+		sysrq_register_handler();
+
+	return 0;
+}
+module_init(sysrq_init);
+`
+然后看sysrq_init_procfs()如何实现。如果带参数CONFIG_PROC_FS，那么就初始化，否则不做任何事情。
+
+`
+#ifdef CONFIG_PROC_FS
+
+static ssize_t write_sysrq_trigger(struct file *file, const char __user *buf,
+				   size_t count, loff_t *ppos)
+{
+	if (count) {
+		char c;
+
+		if (get_user(c, buf))
+			return -EFAULT;
+		__handle_sysrq(c, false);
+	}
+
+	return count;
+}
+
+static const struct file_operations proc_sysrq_trigger_operations = {
+	.write		= write_sysrq_trigger,
+	.llseek		= noop_llseek,
+};
+
+static void sysrq_init_procfs(void)
+{
+	//生成/proc/sysrq-trigger文件，并定义相关操作。主要是write。
+	if (!proc_create("sysrq-trigger", S_IWUSR, NULL,
+			 &proc_sysrq_trigger_operations))
+		pr_err("Failed to register proc interface\n");
+}
+
+#else
+
+static inline void sysrq_init_procfs(void)
+{
+}
+
+#endif /* CONFIG_PROC_FS */
+`
+在write_sysrq_trigger()中，调用了__handle_sysrq，该函数即为核心函数。其中最重要的是
+op_p = __sysrq_get_key_op(key);
+与 op_p->handler(key);
+
+`
+
+void __handle_sysrq(int key, bool check_mask)
+{
+	struct sysrq_key_op *op_p;
+	int orig_log_level;
+	int i;
+
+	rcu_sysrq_start();
+	rcu_read_lock();
+	/*
+	 * Raise the apparent loglevel to maximum so that the sysrq header
+	 * is shown to provide the user with positive feedback.  We do not
+	 * simply emit this at KERN_EMERG as that would change message
+	 * routing in the consumers of /proc/kmsg.
+	 */
+	orig_log_level = console_loglevel;
+	console_loglevel = 7;
+	printk(KERN_INFO "SysRq : ");
+
+        op_p = __sysrq_get_key_op(key);
+        if (op_p) {
+		/*
+		 * Should we check for enabled operations (/proc/sysrq-trigger
+		 * should not) and is the invoked operation enabled?
+		 */
+		if (!check_mask || sysrq_on_mask(op_p->enable_mask)) {
+			printk("%s\n", op_p->action_msg);
+			console_loglevel = orig_log_level;
+			op_p->handler(key);
+		} else {
+			printk("This sysrq operation is disabled.\n");
+		}
+	} else {
+		printk("HELP : ");
+		/* Only print the help msg once per handler */
+		for (i = 0; i < ARRAY_SIZE(sysrq_key_table); i++) {
+			if (sysrq_key_table[i]) {
+				int j;
+
+				for (j = 0; sysrq_key_table[i] !=
+						sysrq_key_table[j]; j++)
+					;
+				if (j != i)
+					continue;
+				printk("%s ", sysrq_key_table[i]->help_msg);
+			}
+		}
+		printk("\n");
+		console_loglevel = orig_log_level;
+	}
+	rcu_read_unlock();
+	rcu_sysrq_end();
+}
+`
+
+__sysrq_get_key_op通过key得到相应的sysrq_key_op，其中的关键是sysrq_key_table这个数组。
+
+
+`
+struct sysrq_key_op *__sysrq_get_key_op(int key)
+{
+        struct sysrq_key_op *op_p = NULL;
+        int i;
+
+	i = sysrq_key_table_key2index(key);
+	if (i != -1)
+	        op_p = sysrq_key_table[i];
+
+        return op_p;
+}
+`
+
+sysrq_key_table的定义如下：
+
+`
+static struct sysrq_key_op *sysrq_key_table[36] = {
+	&sysrq_loglevel_op,		/* 0 */
+	&sysrq_loglevel_op,		/* 1 */
+	&sysrq_loglevel_op,		/* 2 */
+	&sysrq_loglevel_op,		/* 3 */
+	&sysrq_loglevel_op,		/* 4 */
+	&sysrq_loglevel_op,		/* 5 */
+	&sysrq_loglevel_op,		/* 6 */
+	&sysrq_loglevel_op,		/* 7 */
+	&sysrq_loglevel_op,		/* 8 */
+	&sysrq_loglevel_op,		/* 9 */
+
+	/*
+	 * a: Don't use for system provided sysrqs, it is handled specially on
+	 * sparc and will never arrive.
+	 */
+	NULL,				/* a */
+	&sysrq_reboot_op,		/* b */
+	&sysrq_crash_op,		/* c & ibm_emac driver debug */
+	&sysrq_showlocks_op,		/* d */
+	&sysrq_term_op,			/* e */
+	&sysrq_moom_op,			/* f */
+	/* g: May be registered for the kernel debugger */
+	NULL,				/* g */
+	NULL,				/* h - reserved for help */
+	&sysrq_kill_op,			/* i */
+#ifdef CONFIG_BLOCK
+	&sysrq_thaw_op,			/* j */
+#else
+	NULL,				/* j */
+#endif
+	&sysrq_SAK_op,			/* k */
+#ifdef CONFIG_SMP
+	&sysrq_showallcpus_op,		/* l */
+#else
+	NULL,				/* l */
+#endif
+	&sysrq_showmem_op,		/* m */
+	&sysrq_unrt_op,			/* n */
+	/* o: This will often be registered as 'Off' at init time */
+	NULL,				/* o */
+	&sysrq_showregs_op,		/* p */
+	&sysrq_show_timers_op,		/* q */
+	&sysrq_unraw_op,		/* r */
+	&sysrq_sync_op,			/* s */
+	&sysrq_showstate_op,		/* t */
+	&sysrq_mountro_op,		/* u */
+	/* v: May be registered for frame buffer console restore */
+	NULL,				/* v */
+	&sysrq_showstate_blocked_op,	/* w */
+	/* x: May be registered on ppc/powerpc for xmon */
+	/* x: May be registered on sparc64 for global PMU dump */
+	NULL,				/* x */
+	/* y: May be registered on sparc64 for global register dump */
+	NULL,				/* y */
+	&sysrq_ftrace_dump_op,		/* z */
+};
+`
+可以看出，如果当输入为‘m’时，op_p = &sysrq_showmem_op。
+
+`
+、static void sysrq_handle_showmem(int key)
+{
+	show_mem(0);
+}
+static struct sysrq_key_op sysrq_showmem_op = {
+	.handler	= sysrq_handle_showmem,
+	.help_msg	= "show-memory-usage(m)",
+	.action_msg	= "Show Memory",
+	.enable_mask	= SYSRQ_ENABLE_DUMP,
+};
+`
+
+show_mem()函数定义在lib/show_mem.c文件中，具体实现如下：
+`
+
+void show_mem(unsigned int filter)
+{
+	pg_data_t *pgdat;
+	unsigned long total = 0, reserved = 0, highmem = 0;
+
+	printk("Mem-Info:\n");
+	show_free_areas(filter);
+
+	if (filter & SHOW_MEM_FILTER_PAGE_COUNT)
+		return;
+
+	for_each_online_pgdat(pgdat) {
+		unsigned long flags;
+		int zoneid;
+
+		pgdat_resize_lock(pgdat, &flags);
+		for (zoneid = 0; zoneid < MAX_NR_ZONES; zoneid++) {
+			struct zone *zone = &pgdat->node_zones[zoneid];
+			if (!populated_zone(zone))
+				continue;
+
+			total += zone->present_pages;
+			reserved += zone->present_pages - zone->managed_pages;
+
+			if (is_highmem_idx(zoneid))
+				highmem += zone->present_pages;
+		}
+		pgdat_resize_unlock(pgdat, &flags);
+	}
+
+	printk("%lu pages RAM\n", total);
+	printk("%lu pages HighMem/MovableOnly\n", highmem);
+	printk("%lu pages reserved\n", reserved);
+#ifdef CONFIG_QUICKLIST
+	printk("%lu pages in pagetable cache\n",
+		quicklist_total_size());
+#endif
+}
+`
+
+## ps可以看到内核线程的内存使用都是0，为什么？
+通过man ps可以找到以下关于%mem的信息：
+ratio of the process's resident set size  to the physical memory on the machine,  expressed as a percentage.  (alias pmem)
+进程的驻留集大小(resident set size，RSS）与计算机上物理内存的比率，以百分比表示。 （别名pmem）
+关于RSS：
+RSS is the Resident Set Size and is used to show **how much memory is allocated to that process** and is **in RAM**. It does not include memory that is swapped out. It does include memory from shared libraries as long as the pages from those libraries are actually in memory. It does include all stack and heap memory.
+内核线程不使用用户空间，而它使用的内核空间的内存，其实是所有进程共享的，不算进RSS里。
+
 ## top命令中看到的CPU核在各种状态的百分比是如何计算出来的？
+man top
+
+`
+Line 2 shows CPU state percentages based on the interval since the last refresh.
+
+       As  a  default,  percentages for these individual categories are displayed.  Where two labels are shown below,
+       those for more recent kernel versions are shown first.
+           us, user    : time running un-niced user processes
+           sy, system  : time running kernel processes
+           ni, nice    : time running niced user processes
+           id, idle    : time spent in the kernel idle handler
+           wa, IO-wait : time waiting for I/O completion
+           hi : time spent servicing hardware interrupts
+           si : time spent servicing software interrupts
+           st : time stolen from this vm by the hypervisor
+`
 ## gdb -p process_A_pid 跟踪上进程A后可以修改进程A中变量的值，它是如何做到的？ 
+gdb的实现基础是ptrace系统调用。
+
+ ptrace 系统调用是用于进程跟踪的, 当进程调用了 ptrace 跟踪某个进程之后:
+1. 调用 ptrace 的进程会变成被跟踪进程的父进程;
+2. 被跟踪进程的进程状态被标记为 TASK_TRACED;
+3. 发送给被跟踪子进程的信号 (SIGKILL 除外) 会被转发给父进程, 而子进程会被阻塞;
+4. 父进程收到信号后, 可以对子进程进行检查和修改, 然后让子进程继续执行;
+
+在 man ptrace 中可以找到 ptrace 的定义原型:（man ptrace失败，为什么？）
+`
+#include <sys/ptrace.h>
+long ptrace(enum __ptrace_request request, pid_t pid, void *addr, void *data);
+`
+其中 request 参数指定了我们要使用 ptrace 的什么功能, 大致可以分为以下几类:
+`
+PTRACE_ATTACH 或 PTRACE_TRACEME 建立进程间的跟踪关系;
+PTRACE_TRACEME 是被跟踪子进程调用的, 表示让父进程来跟踪自己, 通常是通过 GDB 启动新进程的时候使用;
+PTRACE_ATTACH 是父进程调用 attach 到已经运行的子进程中; 这个命令会有权限的检查, non-root 的进程不能 attach 到 root 进程中;
+PTRACE_PEEKTEXT, PTRACE_PEEKDATA, PTRACE_PEEKUSR 等读取子进程内存/寄存器中保留的值;
+PTRACE_POKETEXT, PTRACE_POKEDATA, PTRACE_POKEUSR 等修改被跟踪进程的内存/寄存器;
+PTRACE_CONT，PTRACE_SYSCALL, PTRACE_SINGLESTEP 控制被跟踪进程以何种方式继续运行;
+PTRACE_SYSCALL 会让被调用进程在每次 进入/退出 系统调用时都触发一次 SIGTRAP; strace 就是通过调用它来实现的, 在每次进入系统调用的时候读取出系统调用参数, 在退出系统调用的时候读取出返回值;
+PTRACE_SINGLESTEP 会在每执行完一条指令后都触发一次 SIGTRAP; GDB 的 nexti, next 命令都是通过它来实现的;
+PTRACE_DETACH, PTRACE_KILL 脱离进程间的跟踪关系;
+`
+当父进程在子进程之前结束时, trace 关系会被自动解除；
+参数 pid 表示的是要跟踪进程的 pid, addr 表示要监控的被跟踪子进程的地址.
+
+修改进程内变量是通过传递PTRACE_PEEKDATA参数实现的。
+在include/uapi/linux/ptrace.h文件中可以找到该参数的定义：#define PTRACE_POKEDATA   5
+然后寻找一下引用它的语句，可以在kernel/ptrace.c中的ptrace_request()函数中找到：
+
+`
+int ptrace_request(struct task_struct *child, long request,
+		   unsigned long addr, unsigned long data)
+{
+	switch (request) {
+	case PTRACE_POKEDATA:
+		return generic_ptrace_pokedata(child, addr, data);	
+`
+
+generic_ptrace_pokedata()函数实现如下：
+
+`
+int generic_ptrace_pokedata(struct task_struct *tsk, unsigned long addr,
+			    unsigned long data)
+{
+	int copied;
+
+	copied = access_process_vm(tsk, addr, &data, sizeof(data), 1);
+	return (copied == sizeof(data)) ? 0 : -EIO;
+}
+`
+access_process_vm(tsk, addr, &data, sizeof(data), 1)是核心。
+
+/*
+ * Access another process' address space.
+ * Source/target buffer must be kernel space,
+ * Do not walk the page table directly, use get_user_pages
+ */
+
+`
+int access_process_vm(struct task_struct *tsk, unsigned long addr,
+		void *buf, int len, int write)
+{
+	struct mm_struct *mm;
+	int ret;
+
+	mm = get_task_mm(tsk);
+	if (!mm)
+		return 0;
+
+	ret = __access_remote_vm(tsk, mm, addr, buf, len, write);
+	mmput(mm);
+
+	return ret;
+}
+`
+在__access_remote_vm()中，get_user_pages()得到相应的在用户空间的页描述符地址，然后copy_to_user_page()函数实现将buf复制到该进程用户空间的目标页的目标地址，从而实现修改变量。
+
+`
+static int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
+		unsigned long addr, void *buf, int len, int write)
+{
+	struct vm_area_struct *vma;
+	void *old_buf = buf;
+
+	down_read(&mm->mmap_sem);
+	/* ignore errors, just check how much was successfully transferred */
+	while (len) {
+		int bytes, ret, offset;
+		void *maddr;
+		struct page *page = NULL;
+
+		ret = get_user_pages(tsk, mm, addr, 1,
+				write, 1, &page, &vma);
+		if (ret <= 0) {
+			/*
+			 * Check if this is a VM_IO | VM_PFNMAP VMA, which
+			 * we can access using slightly different code.
+			 */
+#ifdef CONFIG_HAVE_IOREMAP_PROT
+			vma = find_vma(mm, addr);
+			if (!vma || vma->vm_start > addr)
+				break;
+			if (vma->vm_ops && vma->vm_ops->access)
+				ret = vma->vm_ops->access(vma, addr, buf,
+							  len, write);
+			if (ret <= 0)
+#endif
+				break;
+			bytes = ret;
+		} else {
+			bytes = len;
+			offset = addr & (PAGE_SIZE-1);
+			if (bytes > PAGE_SIZE-offset)
+				bytes = PAGE_SIZE-offset;
+
+			maddr = kmap(page);
+			if (write) {
+				copy_to_user_page(vma, page, addr,
+						  maddr + offset, buf, bytes);
+				set_page_dirty_lock(page);
+			} else {
+				copy_from_user_page(vma, page, addr,
+						    buf, maddr + offset, bytes);
+			}
+			kunmap(page);
+			page_cache_release(page);
+		}
+		len -= bytes;
+		buf += bytes;
+		addr += bytes;
+	}
+	up_read(&mm->mmap_sem);
+
+	return buf - old_buf;
+}
+`
+
+
 ## 系统调用的流程是怎样的？
+
 ## x86上有哪些系统调用的方式？当前x86_64使用的是哪种系统调用方式？ 
 ## 主流的N路组相连的CPU cache是怎么回事？
-## X86的CPU有哪些主要的cache？哪些是socket共享的，哪些是core共享的？
- 
+10.cache的映射
+主存与cache的地址映射方式有全相联方式、直接方式和组相联方式三种。
+直接映射
+将一个主存块存储到唯一的一个Cache行。
 
+多对一的映射关系，但一个主存块只能拷贝到cache的一个特定行位置上去。
+cache的行号i和主存的块号j有如下函数关系：i=j mod m（m为cache中的总行数）
+
+优点：硬件简单，容易实现
+缺点：命中率低， Cache的存储空间利用率低
+
+全相联映射
+可以将一个主存块存储到任意一个Cache行。
+主存的一个块直接拷贝到cache中的任意一行上
+
+优点：命中率较高，Cache的存储空间利用率高
+缺点：线路复杂，成本高，速度低
+
+组相联映射
+可以将一个主存块存储到唯一的一个Cache组中任意一个行。
+将cache分成u组，每组v行，主存块存放到哪个组是固定的，至于存到该组哪一行是灵活的，即有如下函数关系：cache总行数m＝u×v 组号q＝j mod u
+
+组间采用直接映射，组内为全相联
+硬件较简单，速度较快，命中率较高
+
+[cache](https://blog.csdn.net/yhb1047818384/article/details/79604976)
+## X86的CPU有哪些主要的cache？哪些是socket共享的，哪些是core共享的？
+
+以下回答主要来自[这篇文章](https://zhuanlan.zhihu.com/p/109206967)
+
+ 对目前主流的x86平台，CPU的缓存（cache）分为L1(Low level cache)，L2(Middle Level cache)，L3或者LLC（last level cache）总共3级。
+ 可以用lscpu命令查看相关信息。 
+ ![!image](https://pic1.zhimg.com/80/v2-5115b8a97d5ee147c1ad67e8a222fab0_720w.jpg)
+ 
+ L1分为L1i和L1di,i指的是instruction指令缓存，d是数据data缓存。
+ 
+ 作为冯·诺依曼体系的计算机，x86价格的指令和数据在内存中是统一管理的。但由于两者内容访问特性的不同（指令刷新率更低且不会被复写），L1的缓存是做了区分的。
+ 
+ 当前的Intel平台中L1缓存的时延为3个时钟周期，以2.0GHz的CPU计算约1.5纳秒。这种级别的时延可以极大的加速超线程以及CPU分支预测带来的性能优势。
+
+L2缓存的时延是L1的5倍左右，即8ns。每个CPU的物理核心都有自己独立的L2缓存空间。
+
+L3的时延在50～70个时钟周期，30ns。不同于L2，L3缓存是由同一个socket上的所有物理core共享。L3在使用场景中最大的用途是减少数据回写内存的频率，加速多核心之间的数据同步。
+
+## cache一致性协议
